@@ -1,0 +1,21 @@
+# Mantém o serviço acordado no plano grátis do Render (que dorme após
+# 15 min sem tráfego e demora ~30s para acordar — tempo demais para
+# agentes compradores com timeout curto).
+#
+# Nota: o GitHub desativa agendamentos após 60 dias sem atividade no
+# repositório; qualquer commit reativa.
+name: keep-alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping service
+        run: |
+          curl -fsS --max-time 60 https://brasil-dados-api.onrender.com/ > /dev/null
+          echo "servico acordado: $(date -u)"

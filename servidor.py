@@ -132,11 +132,12 @@ ROTAS = {
         exemplo_saida={"cnpj": "11222333000181", "valid": True, "formatted": "11.222.333/0001-81"}),
     "GET /cep/*": _rota(PRECOS["consultar_cep"],
         "Full address (street, district, city, state) for a Brazilian CEP postal code.",
-        exemplo_saida={"cep": "01310-100", "logradouro": "Avenida Paulista",
-                       "cidade": "São Paulo", "uf": "SP"}),
+        exemplo_saida={"cep": "01310-100", "street": "Avenida Paulista",
+                       "city": "São Paulo", "state": "SP"}),
     "GET /cambio": _rota(PRECOS["cambio"],
-        "Live USD/BRL and EUR/BRL exchange rates.",
-        exemplo_saida={"dolar_brl": 5.19, "euro_brl": 5.93}),
+        "Official USD/BRL and EUR/BRL exchange rates (PTAX, Central Bank of Brazil).",
+        exemplo_saida={"usd_brl": 5.19, "eur_brl": 5.94,
+                       "source": "Banco Central do Brasil (PTAX)"}),
 }
 
 def montar_facilitador():
@@ -342,7 +343,7 @@ def cpf(numero: str):
     valido = validar_cpf(numero)
     formatado = (f"{digitos[:3]}.{digitos[3:6]}.{digitos[6:9]}-{digitos[9:]}"
                  if len(digitos) == 11 else None)
-    return {"cpf": digitos, "valido": valido, "formatado": formatado if valido else None}
+    return {"cpf": digitos, "valid": valido, "formatted": formatado if valido else None}
 
 
 @app.get("/cnpj/{numero}")
@@ -351,25 +352,25 @@ def cnpj(numero: str):
     valido = validar_cnpj(numero)
     formatado = (f"{digitos[:2]}.{digitos[2:5]}.{digitos[5:8]}/"
                  f"{digitos[8:12]}-{digitos[12:]}" if len(digitos) == 14 else None)
-    return {"cnpj": digitos, "valido": valido, "formatado": formatado if valido else None}
+    return {"cnpj": digitos, "valid": valido, "formatted": formatado if valido else None}
 
 
 @app.get("/cep/{cep}")
 def cep(cep: str):
     digitos = _so_digitos(cep)
     if len(digitos) != 8:
-        raise HTTPException(status_code=400, detail="CEP deve ter 8 dígitos")
+        raise HTTPException(status_code=400, detail="CEP must have 8 digits")
     resposta = httpx.get(f"https://viacep.com.br/ws/{digitos}/json/", timeout=10)
     dados = resposta.json()
     if dados.get("erro"):
-        raise HTTPException(status_code=404, detail="CEP não encontrado")
+        raise HTTPException(status_code=404, detail="CEP not found")
     return {
         "cep": dados.get("cep"),
-        "logradouro": dados.get("logradouro"),
-        "bairro": dados.get("bairro"),
-        "cidade": dados.get("localidade"),
-        "uf": dados.get("uf"),
-        "ddd": dados.get("ddd"),
+        "street": dados.get("logradouro"),
+        "district": dados.get("bairro"),
+        "city": dados.get("localidade"),
+        "state": dados.get("uf"),
+        "area_code": dados.get("ddd"),
     }
 
 
@@ -379,9 +380,9 @@ def cambio():
     dolar = _sgs(SERIES_BCB["ptax_venda"])[0]
     euro = _sgs(SERIES_BCB["eur_brl"])[0]
     return {
-        "dolar_brl": dolar["value"],
-        "euro_brl": euro["value"],
-        "atualizado_em": dolar["date"],
+        "usd_brl": dolar["value"],
+        "eur_brl": euro["value"],
+        "updated_at": dolar["date"],
         "source": "Banco Central do Brasil (PTAX)",
     }
 

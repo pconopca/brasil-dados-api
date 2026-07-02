@@ -1,72 +1,100 @@
-# Brasil Dados API — agente que vende serviços via x402
+# Brasil Dados API
 
-Um serviço que fica no ar 24h respondendo requisições de outros agentes de IA
-e cobrando **frações de centavo em USDC por chamada**, pagas direto na sua
-carteira própria (web3, sem corretora, sem intermediário, 0% de comissão).
+**Brazilian data for AI agents, paid per call in USDC via [x402](https://docs.cdp.coinbase.com/x402/welcome).**
 
-## O que ele vende
+Official Central Bank of Brazil economic indicators, universal verification
+with receipts, and Brazilian document/address utilities. No API keys, no
+accounts, no subscriptions — your agent pays a fraction of a cent per request
+on Base and gets clean, normalized JSON back.
 
-**Carro-chefe — dados econômicos oficiais do Banco Central do Brasil**, o tipo
-de dado que agentes financeiros internacionais pagam para receber normalizado:
+**Base URL:** `https://brasil-dados-api.onrender.com`
 
-| Serviço | Preço por chamada |
-|---|---|
-| `GET /economy/overview` — Selic, CDI, IPCA (mês e 12 meses) e PTAX numa chamada só | $0.01 |
-| `GET /economy/focus` — previsões do mercado (relatório Focus): inflação, Selic, dólar, PIB | $0.01 |
-| `GET /economy/selic` / `cdi` / `ipca` / `ptax` — indicadores individuais com histórico | $0.005 |
+## Endpoints
 
-**Verificação universal com recibo** (carimbo de tempo + hash SHA-256 como
-comprovante de execução):
+### Economic data — official, from the Central Bank of Brazil
 
-| Serviço | Preço por chamada |
-|---|---|
-| `GET /verify/email/{email}` — sintaxe + checagem real de DNS/MX | $0.002 |
-| `GET /verify/phone/{numero}` — telefone internacional (país, tipo, formato) | $0.001 |
-| `GET /verify/iban/{iban}` — conta bancária internacional (checksum mod-97) | $0.001 |
-| `GET /verify/card/{numero}` — formato de cartão (Luhn + bandeira, sem consultar conta) | $0.001 |
+| Endpoint | Price | Returns |
+|---|---|---|
+| `GET /economy/overview` | $0.010 | SELIC, CDI, IPCA (monthly + 12-month), PTAX USD/BRL in one call |
+| `GET /economy/focus` | $0.010 | Focus report: median market forecasts (~100 institutions) for IPCA, SELIC, GDP, USD/BRL |
+| `GET /economy/selic` | $0.005 | SELIC policy rate, current target + history |
+| `GET /economy/cdi` | $0.005 | CDI interbank rate, latest daily values |
+| `GET /economy/ipca` | $0.005 | IPCA consumer inflation, 12 monthly readings + accumulated |
+| `GET /economy/ptax` | $0.005 | Official PTAX USD/BRL (buy/sell), the reference rate for Brazilian contracts |
 
-**Dados brasileiros básicos** (da primeira versão):
+### Verification with receipts
 
-| Serviço | Preço por chamada |
-|---|---|
-| `GET /cpf/{numero}` / `GET /cnpj/{numero}` — valida documentos | $0.001 |
-| `GET /cep/{cep}` — endereço completo do CEP | $0.002 |
-| `GET /cambio` — dólar e euro em reais | $0.002 |
+Every response includes a timestamped SHA-256 receipt (proof of when and on
+what the verification ran).
 
-Quem paga são principalmente **outros agentes de IA** (sistemas automatizados
-que precisam de dados brasileiros confiáveis), usando o protocolo x402: eles
-recebem a resposta `402 Payment Required`, pagam em USDC na rede Base e
-recebem o dado. Todas as fontes são gratuitas e oficiais (Banco Central,
-ViaCEP, AwesomeAPI) — nosso custo por chamada é zero.
+| Endpoint | Price | Returns |
+|---|---|---|
+| `GET /verify/email/{email}` | $0.002 | Syntax + real DNS/MX record check |
+| `GET /verify/phone/{number}` | $0.001 | E.164 validation: country, type, formatting |
+| `GET /verify/iban/{iban}` | $0.001 | IBAN mod-97 checksum validation |
+| `GET /verify/card/{number}` | $0.001 | Luhn checksum + brand detection (format only, no account lookup) |
 
-## Como testar no seu computador
+### Brazilian documents and addresses
 
+| Endpoint | Price | Returns |
+|---|---|---|
+| `GET /cpf/{number}` | $0.001 | CPF tax ID validation (check digits) |
+| `GET /cnpj/{number}` | $0.001 | CNPJ company tax ID validation |
+| `GET /cep/{code}` | $0.002 | Full address (street, district, city, state) for a postal code |
+| `GET /cambio` | $0.002 | Official USD/BRL and EUR/BRL rates (PTAX) |
+
+`GET /` is free and lists all endpoints with prices.
+
+## How payment works
+
+Standard [x402 protocol](https://docs.cdp.coinbase.com/x402/welcome) flow:
+
+1. Your agent calls an endpoint and receives `402 Payment Required` with
+   payment instructions in the `payment-required` header.
+2. It signs a USDC payment authorization (EIP-3009 — gasless for the buyer)
+   on **Base mainnet** (`eip155:8453`).
+3. It retries with the payment header and receives the data.
+
+Any x402-compatible client works out of the box, for example:
+
+```python
+from eth_account import Account
+from x402 import x402ClientSync
+from x402.mechanisms.evm.exact import register_exact_evm_client
+from x402.http.clients.requests import x402_requests
+
+account = Account.from_key("0x...")          # wallet holding USDC on Base
+client = x402ClientSync()
+register_exact_evm_client(client, account)
+session = x402_requests(client)
+
+r = session.get("https://brasil-dados-api.onrender.com/economy/overview")
+print(r.json())
 ```
-cd /Users/Pedro/Documents/Sites/agente-profit/servico-x402
-.venv/bin/uvicorn servidor:app --port 8402
+
+## Example response
+
+`GET /economy/overview`:
+
+```json
+{
+  "country": "BR",
+  "selic_target_pct_yr": {"date": "2026-08-05", "value": 14.25},
+  "cdi_daily_pct": {"date": "2026-06-30", "value": 0.052531},
+  "ipca_monthly_pct": {"date": "2026-05-01", "value": 0.58},
+  "ipca_12m_accumulated_pct": 4.72,
+  "usd_brl_ptax_sell": {"date": "2026-07-01", "value": 5.195},
+  "source": "Banco Central do Brasil"
+}
 ```
 
-Depois abra http://localhost:8402/ no navegador (a página inicial é grátis).
+## Data sources
 
-## Passos para colocar no ar de verdade (faremos juntos)
+All data comes from free, official public sources: Central Bank of Brazil
+(SGS and Olinda/Focus APIs), ViaCEP, and offline algorithmic validation.
+Economic figures are the official published values, normalized to
+consistent JSON with ISO dates.
 
-1. **Criar sua carteira** — instale a extensão MetaMask (metamask.io), crie
-   uma carteira e **guarde a frase de recuperação no papel, nunca digital**.
-   Copie o endereço (começa com `0x...`) e cole no campo `"carteira"` do
-   arquivo `config.json`. Eu nunca preciso (e nunca devo ter) sua frase ou
-   chave privada — só o endereço público de recebimento.
-2. **Testar na rede de teste** — com `"rede": "base-sepolia"` os pagamentos
-   usam USDC falso de teste. É o modo atual.
-3. **Ir para a rede real** — mudar para `"rede": "base"`. Nesse ponto
-   configuraremos o facilitador da Coinbase (conta de desenvolvedor gratuita).
-4. **Hospedar** — criar conta num serviço como Render ou Railway (~$0–7/mês)
-   e publicar o servidor para ele ficar no ar 24h.
-5. **Ser encontrado** — listar o serviço nos marketplaces x402 (Bazaar, RelAI)
-   para que agentes descubram e usem.
+---
 
-## Expectativa honesta
-
-Isso é um micronegócio digital, não renda garantida. Sem divulgação, a receita
-inicial tende a ser zero. A vantagem: custo quase nulo, nenhum capital em
-risco, e o recebimento é 100% na sua carteira. Se houver demanda, cada 1.000
-chamadas rendem ~$1–2. Impostos sobre o que receber são sua responsabilidade.
+*Guia em português para o mantenedor: [LEIA-ME.md](LEIA-ME.md)*
