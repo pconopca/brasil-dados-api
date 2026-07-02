@@ -163,10 +163,12 @@ def montar_facilitador():
     if os.environ.get("CDP_API_KEY_ID") and os.environ.get("CDP_API_KEY_SECRET"):
         from cdp.x402 import create_facilitator_config
         cfg = create_facilitator_config()
+        # o helper do cdp-sdk pode retornar dict ou objeto conforme a versão
+        obter = (lambda k: cfg[k]) if isinstance(cfg, dict) else (lambda k: getattr(cfg, k))
         print("Facilitador: Coinbase CDP (com chaves de API)")
         return HTTPFacilitatorClient(FacilitatorConfig(
-            url=cfg.url,
-            auth_provider=CreateHeadersAuthProvider(cfg.create_headers)))
+            url=obter("url"),
+            auth_provider=CreateHeadersAuthProvider(obter("create_headers"))))
     if REDE == "eip155:8453":
         print("Facilitador: PayAI (rede principal, sem chaves)")
         return HTTPFacilitatorClient(FacilitatorConfig(
