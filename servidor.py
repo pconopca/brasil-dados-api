@@ -68,13 +68,14 @@ def _opcao(preco):
 def _rota(preco, descricao, exemplo_saida=None, esquema_path=None):
     """Rota paga com descrição em inglês (o público são agentes internacionais).
 
-    exemplo_saida e esquema_path alimentam a extensão de descoberta do Bazaar,
-    para que o CDP indexe o endpoint no marketplace.
+    exemplo_saida alimenta a extensão de descoberta do Bazaar. NÃO declaramos
+    schema de pathParams: o runtime nomeia os parâmetros como var1, var2...
+    e adiciona o schema sozinho — declarar manualmente cria conflito e o
+    CDP rejeita a catalogação (bug que impediu a indexação das rotas /cpf etc.).
     """
     extensao = declare_discovery_extension(
-        path_params_schema=esquema_path,
         output=OutputConfig(example=exemplo_saida) if exemplo_saida else None,
-    ) if (exemplo_saida or esquema_path) else None
+    ) if exemplo_saida else None
     return RouteConfig(
         accepts=_opcao(preco),
         description=descricao,
@@ -83,12 +84,6 @@ def _rota(preco, descricao, exemplo_saida=None, esquema_path=None):
         tags=["brazil", "brasil", "data", "economy", "verify"],
         extensions=extensao,
     )
-
-
-ESQUEMA_NUMERO = {"properties": {"numero": {"type": "string"}}, "required": ["numero"]}
-ESQUEMA_CEP = {"properties": {"cep": {"type": "string"}}, "required": ["cep"]}
-ESQUEMA_EMAIL = {"properties": {"endereco": {"type": "string"}}, "required": ["endereco"]}
-ESQUEMA_IBAN = {"properties": {"iban": {"type": "string"}}, "required": ["iban"]}
 
 
 ROTAS = {
@@ -118,34 +113,27 @@ ROTAS = {
     # --- verificação universal com recibo ---
     "GET /verify/email/*": _rota(PRECOS["verificar_email"],
         "Verify an email address: syntax check + real DNS/MX lookup. Returns timestamped SHA-256 receipt.",
-        exemplo_saida={"email": "user@example.com", "valid": True, "domain_accepts_mail": True},
-        esquema_path=ESQUEMA_EMAIL),
+        exemplo_saida={"email": "user@example.com", "valid": True, "domain_accepts_mail": True}),
     "GET /verify/phone/*": _rota(PRECOS["verificar"],
         "Validate an international phone number (E.164): country, type, formatting. Timestamped receipt.",
-        exemplo_saida={"phone": "+5511987654321", "valid": True, "country": "BR", "type": "mobile"},
-        esquema_path=ESQUEMA_NUMERO),
+        exemplo_saida={"phone": "+5511987654321", "valid": True, "country": "BR", "type": "mobile"}),
     "GET /verify/iban/*": _rota(PRECOS["verificar"],
         "Validate an IBAN bank account number (mod-97 checksum). Timestamped receipt.",
-        exemplo_saida={"iban": "DE89370400440532013000", "valid": True, "country": "DE"},
-        esquema_path=ESQUEMA_IBAN),
+        exemplo_saida={"iban": "DE89370400440532013000", "valid": True, "country": "DE"}),
     "GET /verify/card/*": _rota(PRECOS["verificar"],
         "Validate a payment card number format (Luhn + brand). Format only, no account lookup. Timestamped receipt.",
-        exemplo_saida={"card_prefix": "411111", "valid_format": True, "brand": "visa"},
-        esquema_path=ESQUEMA_NUMERO),
+        exemplo_saida={"card_prefix": "411111", "valid_format": True, "brand": "visa"}),
     # --- documentos e dados brasileiros ---
     "GET /cpf/*": _rota(PRECOS["validar_documento"],
         "Validate a Brazilian CPF tax ID (check digits).",
-        exemplo_saida={"cpf": "52998224725", "valid": True, "formatted": "529.982.247-25"},
-        esquema_path=ESQUEMA_NUMERO),
+        exemplo_saida={"cpf": "52998224725", "valid": True, "formatted": "529.982.247-25"}),
     "GET /cnpj/*": _rota(PRECOS["validar_documento"],
         "Validate a Brazilian CNPJ company tax ID (check digits).",
-        exemplo_saida={"cnpj": "11222333000181", "valid": True, "formatted": "11.222.333/0001-81"},
-        esquema_path=ESQUEMA_NUMERO),
+        exemplo_saida={"cnpj": "11222333000181", "valid": True, "formatted": "11.222.333/0001-81"}),
     "GET /cep/*": _rota(PRECOS["consultar_cep"],
         "Full address (street, district, city, state) for a Brazilian CEP postal code.",
         exemplo_saida={"cep": "01310-100", "logradouro": "Avenida Paulista",
-                       "cidade": "São Paulo", "uf": "SP"},
-        esquema_path=ESQUEMA_CEP),
+                       "cidade": "São Paulo", "uf": "SP"}),
     "GET /cambio": _rota(PRECOS["cambio"],
         "Live USD/BRL and EUR/BRL exchange rates.",
         exemplo_saida={"dolar_brl": 5.19, "euro_brl": 5.93}),
