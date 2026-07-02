@@ -1,0 +1,500 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BRASIL DADOS API — serviço pago via x402 (micropagamentos em USDC)
+
+Um agente-serviço: fica no ar respondendo requisições de outros agentes de IA
+e sistemas, cobrando frações de centavo em USDC por chamada, pagas direto na
+carteira configurada em config.json. Sem corretora, sem intermediário.
+
+Serviços oferecidos:
+    GET /                       -> descrição do serviço (grátis)
+    GET /cpf/{numero}           -> valida CPF (pago)
+    GET /cnpj/{numero}          -> valida CNPJ (pago)
+    GET /cep/{cep}              -> endereço completo de um CEP (pago)
+    GET /cambio                 -> cotação do dólar e do euro em reais (pago)
+
+Rodar localmente:
+    .venv/bin/uvicorn servidor:app --host 0.0.0.0 --port 8000
+"""
+
+import hashlib
+import json
+import os
+import re
+from datetime import datetime, timezone
+
+import dns.resolver
+import httpx
+import phonenumbers
+from fastapi import FastAPI, HTTPException
+
+from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption, RouteConfig
+from x402.http.middleware.fastapi import payment_middleware
+from x402.mechanisms.evm.exact import register_exact_evm_server
+from x402.server import x402ResourceServer
+
+PASTA = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(PASTA, "config.json"), encoding="utf-8") as f:
+    CONFIG = json.load(f)
+
+# variáveis de ambiente (usadas na hospedagem) têm prioridade sobre config.json
+CARTEIRA = os.environ.get("X402_WALLET", CONFIG["carteira"])
+PRECOS = CONFIG["precos"]
+
+# nomes amigáveis -> identificador padrão da rede (CAIP-2)
+REDES = {
+    "base": "eip155:8453",          # Base (rede principal, USDC de verdade)
+    "base-sepolia": "eip155:84532",  # Base Sepolia (rede de teste)
+}
+NOME_REDE = os.environ.get("X402_NETWORK", CONFIG["rede"])
+REDE = REDES.get(NOME_REDE, NOME_REDE)
+
+if CARTEIRA == "0x0000000000000000000000000000000000000001":
+    print("=" * 70)
+    print("ATENÇÃO: usando carteira de DEMONSTRAÇÃO. Pagamentos não chegam a")
+    print("ninguém. Edite config.json e coloque o seu endereço (MetaMask).")
+    print("=" * 70)
+
+app = FastAPI(title=CONFIG["nome_servico"])
+
+
+def _opcao(preco):
+    return PaymentOption(scheme="exact", pay_to=CARTEIRA, price=preco, network=REDE)
+
+
+def _rota(preco, descricao):
+    """Rota paga com descrição em inglês (o público são agentes internacionais)."""
+    return RouteConfig(
+        accepts=_opcao(preco),
+        description=descricao,
+        service_name=CONFIG["nome_servico"],
+        mime_type="application/json",
+    )
+
+
+ROTAS = {
+    # --- documentos e dados brasileiros ---
+    "GET /cpf/*": _rota(PRECOS["validar_documento"],
+                        "Validate a Brazilian CPF tax ID (check digits)."),
+    "GET /cnpj/*": _rota(PRECOS["validar_documento"],
+                         "Validate a Brazilian CNPJ company tax ID (check digits)."),
+    "GET /cep/*": _rota(PRECOS["consultar_cep"],
+                        "Full address (street, district, city, state) for a Brazilian CEP postal code."),
+    "GET /cambio": _rota(PRECOS["cambio"],
+                         "Live USD/BRL and EUR/BRL exchange rates."),
+    # --- dados econômicos oficiais (Banco Central do Brasil) ---
+    "GET /economy/overview": _rota(PRECOS["economia_pacote"],
+                                   "Brazil macro snapshot in one call: SELIC policy rate, CDI, "
+                                   "IPCA inflation (monthly and 12-month), official PTAX USD/BRL. "
+                                   "Source: Central Bank of Brazil (BCB), normalized JSON."),
+    "GET /economy/selic": _rota(PRECOS["economia"],
+                                "Brazil SELIC policy interest rate, current target and recent history. "
+                                "Official Central Bank of Brazil data."),
+    "GET /economy/cdi": _rota(PRECOS["economia"],
+                              "Brazil CDI interbank rate, latest daily values. "
+                              "Official Central Bank of Brazil data."),
+    "GET /economy/ipca": _rota(PRECOS["economia"],
+                               "Brazil IPCA consumer inflation: last 12 monthly readings and "
+                               "12-month accumulated. Official Central Bank of Brazil data."),
+    "GET /economy/ptax": _rota(PRECOS["economia"],
+                               "Official PTAX USD/BRL exchange rate (the reference rate used in "
+                               "Brazilian contracts). Central Bank of Brazil data."),
+    "GET /economy/focus": _rota(PRECOS["economia_pacote"],
+                                "Focus report: median market forecasts from ~100 institutions for "
+                                "Brazil IPCA inflation, SELIC, GDP and USD/BRL. Central Bank of Brazil."),
+    # --- verificação universal com recibo ---
+    "GET /verify/email/*": _rota(PRECOS["verificar_email"],
+                                 "Verify an email address: syntax and real DNS/MX record check. "
+                                 "Returns a timestamped SHA-256 receipt."),
+    "GET /verify/phone/*": _rota(PRECOS["verificar"],
+                                 "Validate an international phone number (E.164): country, type, "
+                                 "formatting. Returns a timestamped SHA-256 receipt."),
+    "GET /verify/iban/*": _rota(PRECOS["verificar"],
+                                "Validate an IBAN bank account number (mod-97 checksum). "
+                                "Returns a timestamped SHA-256 receipt."),
+    "GET /verify/card/*": _rota(PRECOS["verificar"],
+                                "Validate a payment card number format (Luhn checksum + brand detection). "
+                                "Format check only, no account lookup. Timestamped SHA-256 receipt."),
+}
+
+def montar_facilitador():
+    """Escolhe quem liquida os pagamentos, do mais ao menos preferido:
+    1. Coinbase CDP — se houver chaves no ambiente (produção recomendada);
+    2. PayAI — rede principal sem precisar de chaves;
+    3. x402.org — só redes de teste.
+    O facilitador nunca segura o dinheiro: a assinatura do pagador já fixa
+    a carteira de destino; ele apenas verifica e registra na blockchain.
+    """
+    from x402.http import CreateHeadersAuthProvider
+    if os.environ.get("CDP_API_KEY_ID") and os.environ.get("CDP_API_KEY_SECRET"):
+        from cdp.x402 import create_facilitator_config
+        cfg = create_facilitator_config()
+        print("Facilitador: Coinbase CDP (com chaves de API)")
+        return HTTPFacilitatorClient(FacilitatorConfig(
+            url=cfg.url,
+            auth_provider=CreateHeadersAuthProvider(cfg.create_headers)))
+    if REDE == "eip155:8453":
+        print("Facilitador: PayAI (rede principal, sem chaves)")
+        return HTTPFacilitatorClient(FacilitatorConfig(
+            url="https://facilitator.payai.network"))
+    print("Facilitador: x402.org (rede de teste)")
+    return HTTPFacilitatorClient(FacilitatorConfig(url=CONFIG["facilitador"]))
+
+
+facilitador = montar_facilitador()
+_servidor = x402ResourceServer(facilitador)
+register_exact_evm_server(_servidor)
+app.middleware("http")(payment_middleware(ROTAS, _servidor))
+
+
+# ---------------------------------------------------------------- validações
+
+def _so_digitos(texto):
+    return re.sub(r"\D", "", texto)
+
+
+def validar_cpf(cpf):
+    cpf = _so_digitos(cpf)
+    if len(cpf) != 11 or cpf == cpf[0] * 11:
+        return False
+    for n in (9, 10):
+        soma = sum(int(cpf[i]) * ((n + 1) - i) for i in range(n))
+        digito = (soma * 10) % 11 % 10
+        if digito != int(cpf[n]):
+            return False
+    return True
+
+
+def validar_cnpj(cnpj):
+    cnpj = _so_digitos(cnpj)
+    if len(cnpj) != 14 or cnpj == cnpj[0] * 14:
+        return False
+    pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    pesos2 = [6] + pesos1
+    for pesos, n in ((pesos1, 12), (pesos2, 13)):
+        soma = sum(int(cnpj[i]) * pesos[i] for i in range(n))
+        resto = soma % 11
+        digito = 0 if resto < 2 else 11 - resto
+        if digito != int(cnpj[n]):
+            return False
+    return True
+
+
+# ------------------------------------------------ Banco Central do Brasil
+
+SERIES_BCB = {
+    "selic": 432,       # meta Selic definida pelo Copom (% a.a.)
+    "cdi": 12,          # CDI diário (% a.d.)
+    "ipca": 433,        # IPCA variação mensal (%)
+    "ptax_venda": 1,    # dólar PTAX venda (R$)
+    "ptax_compra": 10813,  # dólar PTAX compra (R$)
+}
+
+
+def _data_iso(data_br):
+    """Converte '01/07/2026' (formato do BCB) para '2026-07-01'."""
+    d, m, a = data_br.split("/")
+    return f"{a}-{m}-{d}"
+
+
+def _sgs(codigo, n=1):
+    """Busca os últimos n valores de uma série do Banco Central (API pública)."""
+    resposta = httpx.get(
+        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/{n}",
+        params={"formato": "json"}, timeout=15)
+    resposta.raise_for_status()
+    return [{"date": _data_iso(item["data"]), "value": float(item["valor"])}
+            for item in resposta.json()]
+
+
+def _focus_anual(indicador, maximo=12):
+    """Medianas do boletim Focus (expectativas anuais do mercado)."""
+    from urllib.parse import quote
+    # o servidor OData do BCB exige espaços como %20 (rejeita o formato '+')
+    filtro = quote(f"Indicador eq '{indicador}'")
+    consulta = (f"$top={maximo}&$orderby={quote('Data desc')}"
+                f"&$filter={filtro}&$format=json")
+    resposta = httpx.get(
+        "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/"
+        f"ExpectativasMercadoAnuais?{consulta}", timeout=20)
+    resposta.raise_for_status()
+    registros = resposta.json()["value"]
+    ano_atual = datetime.now().year
+    vistos = {}
+    for r in registros:
+        ano = str(r["DataReferencia"])
+        if r.get("baseCalculo") not in (0, None):
+            continue
+        if ano not in vistos and ano.isdigit() and int(ano) >= ano_atual:
+            vistos[ano] = {"reference_year": int(ano), "median": r["Mediana"],
+                           "survey_date": r["Data"]}
+    return sorted(vistos.values(), key=lambda x: x["reference_year"])[:2]
+
+
+# ------------------------------------------------ verificadores universais
+
+def _recibo(entrada, resultado):
+    """Recibo com carimbo de tempo: prova de quando e sobre o quê a verificação rodou."""
+    momento = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    resumo = hashlib.sha256(json.dumps(
+        {"input": entrada, "result": resultado, "timestamp": momento},
+        sort_keys=True, default=str).encode()).hexdigest()
+    return {"timestamp": momento, "sha256": resumo}
+
+
+def _com_recibo(entrada, resultado):
+    resultado["receipt"] = _recibo(entrada, resultado)
+    return resultado
+
+
+def validar_iban(iban):
+    iban = re.sub(r"\s", "", iban).upper()
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}", iban):
+        return iban, False
+    numerico = "".join(str(int(c, 36)) for c in iban[4:] + iban[:4])
+    return iban, int(numerico) % 97 == 1
+
+
+def luhn(numero):
+    digitos = [int(d) for d in numero][::-1]
+    soma = 0
+    for i, d in enumerate(digitos):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        soma += d
+    return soma % 10 == 0
+
+
+BANDEIRAS = [
+    ("visa", r"4\d{12}(\d{3})?(\d{3})?"),
+    ("mastercard", r"(5[1-5]\d{14}|2(2[2-9]\d|[3-6]\d{2}|7[01]\d|720)\d{12})"),
+    ("amex", r"3[47]\d{13}"),
+    ("diners", r"3(0[0-5]|[68]\d)\d{11}"),
+    ("discover", r"6(011|5\d{2})\d{12}"),
+    ("jcb", r"35(2[89]|[3-8]\d)\d{12}"),
+    ("elo", r"(4011(78|79)|43(1274|8935)|45(1416|7393|763[12])|50(4175|6699|67\d{2}|9\d{3})|627780|63(6297|6368)|650\d{3}|6516\d{2}|6550\d{2})\d{10}"),
+]
+
+
+# ---------------------------------------------------------------- endpoints
+
+@app.get("/")
+def raiz():
+    """Descrição do serviço — grátis, para agentes descobrirem o que vendemos."""
+    return {
+        "service": CONFIG["nome_servico"],
+        "description": "Brazilian data for AI agents: official Central Bank "
+                       "economic indicators (SELIC, IPCA, CDI, PTAX, Focus "
+                       "forecasts), document/address lookups, and universal "
+                       "verification with receipts. Pay per call via x402 (USDC).",
+        "network": REDE,
+        "endpoints": {
+            "GET /economy/overview": PRECOS["economia_pacote"],
+            "GET /economy/selic": PRECOS["economia"],
+            "GET /economy/cdi": PRECOS["economia"],
+            "GET /economy/ipca": PRECOS["economia"],
+            "GET /economy/ptax": PRECOS["economia"],
+            "GET /economy/focus": PRECOS["economia_pacote"],
+            "GET /verify/email/{email}": PRECOS["verificar_email"],
+            "GET /verify/phone/{number}": PRECOS["verificar"],
+            "GET /verify/iban/{iban}": PRECOS["verificar"],
+            "GET /verify/card/{number}": PRECOS["verificar"],
+            "GET /cpf/{numero}": PRECOS["validar_documento"],
+            "GET /cnpj/{numero}": PRECOS["validar_documento"],
+            "GET /cep/{cep}": PRECOS["consultar_cep"],
+            "GET /cambio": PRECOS["cambio"],
+        },
+        "source_attribution": "Economic data: Banco Central do Brasil (BCB/SGS, Olinda).",
+    }
+
+
+@app.get("/cpf/{numero}")
+def cpf(numero: str):
+    digitos = _so_digitos(numero)
+    valido = validar_cpf(numero)
+    formatado = (f"{digitos[:3]}.{digitos[3:6]}.{digitos[6:9]}-{digitos[9:]}"
+                 if len(digitos) == 11 else None)
+    return {"cpf": digitos, "valido": valido, "formatado": formatado if valido else None}
+
+
+@app.get("/cnpj/{numero}")
+def cnpj(numero: str):
+    digitos = _so_digitos(numero)
+    valido = validar_cnpj(numero)
+    formatado = (f"{digitos[:2]}.{digitos[2:5]}.{digitos[5:8]}/"
+                 f"{digitos[8:12]}-{digitos[12:]}" if len(digitos) == 14 else None)
+    return {"cnpj": digitos, "valido": valido, "formatado": formatado if valido else None}
+
+
+@app.get("/cep/{cep}")
+def cep(cep: str):
+    digitos = _so_digitos(cep)
+    if len(digitos) != 8:
+        raise HTTPException(status_code=400, detail="CEP deve ter 8 dígitos")
+    resposta = httpx.get(f"https://viacep.com.br/ws/{digitos}/json/", timeout=10)
+    dados = resposta.json()
+    if dados.get("erro"):
+        raise HTTPException(status_code=404, detail="CEP não encontrado")
+    return {
+        "cep": dados.get("cep"),
+        "logradouro": dados.get("logradouro"),
+        "bairro": dados.get("bairro"),
+        "cidade": dados.get("localidade"),
+        "uf": dados.get("uf"),
+        "ddd": dados.get("ddd"),
+    }
+
+
+@app.get("/cambio")
+def cambio():
+    resposta = httpx.get(
+        "https://economia.awesomeapi.com.br/json/last/USD-BRL,EUR-BRL", timeout=10)
+    dados = resposta.json()
+    return {
+        "dolar_brl": float(dados["USDBRL"]["bid"]),
+        "euro_brl": float(dados["EURBRL"]["bid"]),
+        "atualizado_em": dados["USDBRL"]["create_date"],
+    }
+
+
+# --------------------------------------------- economia (Banco Central)
+
+@app.get("/economy/overview")
+def economy_overview():
+    ipca_12m = _sgs(SERIES_BCB["ipca"], 12)
+    acumulado = 1.0
+    for item in ipca_12m:
+        acumulado *= 1 + item["value"] / 100
+    return {
+        "country": "BR",
+        "selic_target_pct_yr": _sgs(SERIES_BCB["selic"])[0],
+        "cdi_daily_pct": _sgs(SERIES_BCB["cdi"])[0],
+        "ipca_monthly_pct": ipca_12m[-1],
+        "ipca_12m_accumulated_pct": round((acumulado - 1) * 100, 2),
+        "usd_brl_ptax_sell": _sgs(SERIES_BCB["ptax_venda"])[0],
+        "source": "Banco Central do Brasil",
+    }
+
+
+@app.get("/economy/selic")
+def economy_selic():
+    historico = _sgs(SERIES_BCB["selic"], 10)
+    return {"indicator": "SELIC target rate (% per year)",
+            "current": historico[-1], "history": historico,
+            "source": "Banco Central do Brasil, series 432"}
+
+
+@app.get("/economy/cdi")
+def economy_cdi():
+    historico = _sgs(SERIES_BCB["cdi"], 10)
+    return {"indicator": "CDI interbank rate (% per day)",
+            "current": historico[-1], "history": historico,
+            "source": "Banco Central do Brasil, series 12"}
+
+
+@app.get("/economy/ipca")
+def economy_ipca():
+    historico = _sgs(SERIES_BCB["ipca"], 12)
+    acumulado = 1.0
+    for item in historico:
+        acumulado *= 1 + item["value"] / 100
+    return {"indicator": "IPCA consumer inflation (% per month)",
+            "latest": historico[-1],
+            "accumulated_12m_pct": round((acumulado - 1) * 100, 2),
+            "history": historico,
+            "source": "Banco Central do Brasil, series 433"}
+
+
+@app.get("/economy/ptax")
+def economy_ptax():
+    return {"indicator": "PTAX official USD/BRL rate",
+            "sell": _sgs(SERIES_BCB["ptax_venda"])[0],
+            "buy": _sgs(SERIES_BCB["ptax_compra"])[0],
+            "note": "PTAX is the official reference rate used in Brazilian contracts.",
+            "source": "Banco Central do Brasil, series 1 and 10813"}
+
+
+@app.get("/economy/focus")
+def economy_focus():
+    indicadores = {"IPCA": "ipca_inflation_pct", "Selic": "selic_rate_pct",
+                   "Câmbio": "usd_brl", "PIB Total": "gdp_growth_pct"}
+    previsoes = {}
+    for nome_bcb, chave in indicadores.items():
+        try:
+            previsoes[chave] = _focus_anual(nome_bcb)
+        except Exception:
+            previsoes[chave] = []
+    return {"report": "Focus — median market forecasts (~100 institutions)",
+            "forecasts": previsoes,
+            "source": "Banco Central do Brasil, Focus/Olinda"}
+
+
+# --------------------------------------------- verificação com recibo
+
+@app.get("/verify/email/{endereco}")
+def verify_email(endereco: str):
+    sintaxe = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", endereco))
+    tem_mx = False
+    if sintaxe:
+        dominio = endereco.rsplit("@", 1)[1]
+        try:
+            tem_mx = len(dns.resolver.resolve(dominio, "MX")) > 0
+        except Exception:
+            try:
+                tem_mx = len(dns.resolver.resolve(dominio, "A")) > 0
+            except Exception:
+                tem_mx = False
+    return _com_recibo(endereco, {
+        "email": endereco, "valid_syntax": sintaxe,
+        "domain_accepts_mail": tem_mx, "valid": sintaxe and tem_mx,
+    })
+
+
+@app.get("/verify/phone/{numero}")
+def verify_phone(numero: str):
+    bruto = numero if numero.startswith("+") else "+" + _so_digitos(numero)
+    tipos = {v: n.lower() for n, v in vars(phonenumbers.PhoneNumberType).items()
+             if isinstance(v, int)}
+    try:
+        analisado = phonenumbers.parse(bruto, None)
+        valido = phonenumbers.is_valid_number(analisado)
+        resultado = {
+            "phone": bruto, "valid": valido,
+            "country": phonenumbers.region_code_for_number(analisado),
+            "type": tipos.get(phonenumbers.number_type(analisado)),
+            "e164": phonenumbers.format_number(
+                analisado, phonenumbers.PhoneNumberFormat.E164) if valido else None,
+        }
+    except phonenumbers.NumberParseException:
+        resultado = {"phone": bruto, "valid": False, "country": None,
+                     "type": None, "e164": None}
+    return _com_recibo(numero, resultado)
+
+
+@app.get("/verify/iban/{iban}")
+def verify_iban(iban: str):
+    normalizado, valido = validar_iban(iban)
+    return _com_recibo(iban, {
+        "iban": normalizado, "valid": valido,
+        "country": normalizado[:2] if valido else None,
+    })
+
+
+@app.get("/verify/card/{numero}")
+def verify_card(numero: str):
+    digitos = _so_digitos(numero)
+    valido = 12 <= len(digitos) <= 19 and luhn(digitos)
+    bandeira = None
+    if valido:
+        for nome, padrao in BANDEIRAS:
+            if re.fullmatch(padrao, digitos):
+                bandeira = nome
+                break
+    return _com_recibo(numero, {
+        "card_prefix": digitos[:6] if len(digitos) >= 6 else None,
+        "valid_format": valido, "brand": bandeira,
+        "note": "Format/checksum validation only; no account lookup.",
+    })

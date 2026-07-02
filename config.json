@@ -1,0 +1,15 @@
+{
+  "carteira": "0x649006bC937E7a60F98e49455D0fE3425321A3b0",
+  "rede": "base-sepolia",
+  "facilitador": "https://x402.org/facilitator",
+  "nome_servico": "Brasil Dados API",
+  "precos": {
+    "validar_documento": "$0.001",
+    "consultar_cep": "$0.002",
+    "cambio": "$0.002",
+    "economia": "$0.005",
+    "economia_pacote": "$0.01",
+    "verificar": "$0.001",
+    "verificar_email": "$0.002"
+  }
+}

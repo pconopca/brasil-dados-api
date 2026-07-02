@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: brasil-dados-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn servidor:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: X402_NETWORK
+        value: base
+      - key: X402_WALLET
+        value: "0x649006bC937E7a60F98e49455D0fE3425321A3b0"
+      - key: PYTHON_VERSION
+        value: "3.13.3"

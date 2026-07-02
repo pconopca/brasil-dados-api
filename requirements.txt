@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+httpx
+x402[extensions]
+dnspython
+phonenumbers
+cdp-sdk
