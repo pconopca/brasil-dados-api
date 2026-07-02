@@ -33,6 +33,8 @@ from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption, R
 from x402.http.middleware.fastapi import payment_middleware
 from x402.mechanisms.evm.exact import register_exact_evm_server
 from x402.server import x402ResourceServer
+from x402.extensions.bazaar import (bazaar_resource_server_extension,
+                                     declare_discovery_extension, OutputConfig)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PASTA, "config.json"), encoding="utf-8") as f:
@@ -63,59 +65,90 @@ def _opcao(preco):
     return PaymentOption(scheme="exact", pay_to=CARTEIRA, price=preco, network=REDE)
 
 
-def _rota(preco, descricao):
-    """Rota paga com descrição em inglês (o público são agentes internacionais)."""
+def _rota(preco, descricao, exemplo_saida=None, esquema_path=None):
+    """Rota paga com descrição em inglês (o público são agentes internacionais).
+
+    exemplo_saida e esquema_path alimentam a extensão de descoberta do Bazaar,
+    para que o CDP indexe o endpoint no marketplace.
+    """
+    extensao = declare_discovery_extension(
+        path_params_schema=esquema_path,
+        output=OutputConfig(example=exemplo_saida) if exemplo_saida else None,
+    ) if (exemplo_saida or esquema_path) else None
     return RouteConfig(
         accepts=_opcao(preco),
         description=descricao,
         service_name=CONFIG["nome_servico"],
         mime_type="application/json",
+        tags=["brazil", "brasil", "data", "economy", "verify"],
+        extensions=extensao,
     )
 
 
+ESQUEMA_NUMERO = {"properties": {"numero": {"type": "string"}}, "required": ["numero"]}
+ESQUEMA_CEP = {"properties": {"cep": {"type": "string"}}, "required": ["cep"]}
+ESQUEMA_EMAIL = {"properties": {"endereco": {"type": "string"}}, "required": ["endereco"]}
+ESQUEMA_IBAN = {"properties": {"iban": {"type": "string"}}, "required": ["iban"]}
+
+
 ROTAS = {
-    # --- documentos e dados brasileiros ---
-    "GET /cpf/*": _rota(PRECOS["validar_documento"],
-                        "Validate a Brazilian CPF tax ID (check digits)."),
-    "GET /cnpj/*": _rota(PRECOS["validar_documento"],
-                         "Validate a Brazilian CNPJ company tax ID (check digits)."),
-    "GET /cep/*": _rota(PRECOS["consultar_cep"],
-                        "Full address (street, district, city, state) for a Brazilian CEP postal code."),
-    "GET /cambio": _rota(PRECOS["cambio"],
-                         "Live USD/BRL and EUR/BRL exchange rates."),
     # --- dados econômicos oficiais (Banco Central do Brasil) ---
     "GET /economy/overview": _rota(PRECOS["economia_pacote"],
-                                   "Brazil macro snapshot in one call: SELIC policy rate, CDI, "
-                                   "IPCA inflation (monthly and 12-month), official PTAX USD/BRL. "
-                                   "Source: Central Bank of Brazil (BCB), normalized JSON."),
+        "Brazil macro snapshot in one call: SELIC policy rate, CDI, IPCA inflation "
+        "(monthly and 12-month), official PTAX USD/BRL. Source: Central Bank of Brazil (BCB).",
+        exemplo_saida={"country": "BR", "selic_target_pct_yr": {"date": "2026-08-05", "value": 14.25},
+                       "ipca_12m_accumulated_pct": 4.72, "usd_brl_ptax_sell": {"date": "2026-07-01", "value": 5.19}}),
     "GET /economy/selic": _rota(PRECOS["economia"],
-                                "Brazil SELIC policy interest rate, current target and recent history. "
-                                "Official Central Bank of Brazil data."),
+        "Brazil SELIC policy interest rate, current target and recent history. Central Bank of Brazil.",
+        exemplo_saida={"indicator": "SELIC target rate (% per year)",
+                       "current": {"date": "2026-08-05", "value": 14.25}}),
     "GET /economy/cdi": _rota(PRECOS["economia"],
-                              "Brazil CDI interbank rate, latest daily values. "
-                              "Official Central Bank of Brazil data."),
+        "Brazil CDI interbank rate, latest daily values. Central Bank of Brazil.",
+        exemplo_saida={"indicator": "CDI interbank rate (% per day)",
+                       "current": {"date": "2026-06-30", "value": 0.052}}),
     "GET /economy/ipca": _rota(PRECOS["economia"],
-                               "Brazil IPCA consumer inflation: last 12 monthly readings and "
-                               "12-month accumulated. Official Central Bank of Brazil data."),
+        "Brazil IPCA consumer inflation: last 12 monthly readings and 12-month accumulated. Central Bank of Brazil.",
+        exemplo_saida={"indicator": "IPCA (% per month)", "accumulated_12m_pct": 4.72}),
     "GET /economy/ptax": _rota(PRECOS["economia"],
-                               "Official PTAX USD/BRL exchange rate (the reference rate used in "
-                               "Brazilian contracts). Central Bank of Brazil data."),
+        "Official PTAX USD/BRL exchange rate (the reference rate used in Brazilian contracts). Central Bank of Brazil.",
+        exemplo_saida={"indicator": "PTAX USD/BRL", "sell": {"date": "2026-07-01", "value": 5.195}}),
     "GET /economy/focus": _rota(PRECOS["economia_pacote"],
-                                "Focus report: median market forecasts from ~100 institutions for "
-                                "Brazil IPCA inflation, SELIC, GDP and USD/BRL. Central Bank of Brazil."),
+        "Focus report: median market forecasts from ~100 institutions for Brazil IPCA, SELIC, GDP and USD/BRL.",
+        exemplo_saida={"forecasts": {"ipca_inflation_pct": [{"reference_year": 2026, "median": 5.32}]}}),
     # --- verificação universal com recibo ---
     "GET /verify/email/*": _rota(PRECOS["verificar_email"],
-                                 "Verify an email address: syntax and real DNS/MX record check. "
-                                 "Returns a timestamped SHA-256 receipt."),
+        "Verify an email address: syntax check + real DNS/MX lookup. Returns timestamped SHA-256 receipt.",
+        exemplo_saida={"email": "user@example.com", "valid": True, "domain_accepts_mail": True},
+        esquema_path=ESQUEMA_EMAIL),
     "GET /verify/phone/*": _rota(PRECOS["verificar"],
-                                 "Validate an international phone number (E.164): country, type, "
-                                 "formatting. Returns a timestamped SHA-256 receipt."),
+        "Validate an international phone number (E.164): country, type, formatting. Timestamped receipt.",
+        exemplo_saida={"phone": "+5511987654321", "valid": True, "country": "BR", "type": "mobile"},
+        esquema_path=ESQUEMA_NUMERO),
     "GET /verify/iban/*": _rota(PRECOS["verificar"],
-                                "Validate an IBAN bank account number (mod-97 checksum). "
-                                "Returns a timestamped SHA-256 receipt."),
+        "Validate an IBAN bank account number (mod-97 checksum). Timestamped receipt.",
+        exemplo_saida={"iban": "DE89370400440532013000", "valid": True, "country": "DE"},
+        esquema_path=ESQUEMA_IBAN),
     "GET /verify/card/*": _rota(PRECOS["verificar"],
-                                "Validate a payment card number format (Luhn checksum + brand detection). "
-                                "Format check only, no account lookup. Timestamped SHA-256 receipt."),
+        "Validate a payment card number format (Luhn + brand). Format only, no account lookup. Timestamped receipt.",
+        exemplo_saida={"card_prefix": "411111", "valid_format": True, "brand": "visa"},
+        esquema_path=ESQUEMA_NUMERO),
+    # --- documentos e dados brasileiros ---
+    "GET /cpf/*": _rota(PRECOS["validar_documento"],
+        "Validate a Brazilian CPF tax ID (check digits).",
+        exemplo_saida={"cpf": "52998224725", "valid": True, "formatted": "529.982.247-25"},
+        esquema_path=ESQUEMA_NUMERO),
+    "GET /cnpj/*": _rota(PRECOS["validar_documento"],
+        "Validate a Brazilian CNPJ company tax ID (check digits).",
+        exemplo_saida={"cnpj": "11222333000181", "valid": True, "formatted": "11.222.333/0001-81"},
+        esquema_path=ESQUEMA_NUMERO),
+    "GET /cep/*": _rota(PRECOS["consultar_cep"],
+        "Full address (street, district, city, state) for a Brazilian CEP postal code.",
+        exemplo_saida={"cep": "01310-100", "logradouro": "Avenida Paulista",
+                       "cidade": "São Paulo", "uf": "SP"},
+        esquema_path=ESQUEMA_CEP),
+    "GET /cambio": _rota(PRECOS["cambio"],
+        "Live USD/BRL and EUR/BRL exchange rates.",
+        exemplo_saida={"dolar_brl": 5.19, "euro_brl": 5.93}),
 }
 
 def montar_facilitador():
@@ -144,6 +177,7 @@ def montar_facilitador():
 
 facilitador = montar_facilitador()
 _servidor = x402ResourceServer(facilitador)
+_servidor.register_extension(bazaar_resource_server_extension)
 register_exact_evm_server(_servidor)
 app.middleware("http")(payment_middleware(ROTAS, _servidor))
 
