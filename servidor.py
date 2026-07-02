@@ -225,6 +225,7 @@ SERIES_BCB = {
     "ipca": 433,        # IPCA variação mensal (%)
     "ptax_venda": 1,    # dólar PTAX venda (R$)
     "ptax_compra": 10813,  # dólar PTAX compra (R$)
+    "eur_brl": 21619,   # euro PTAX venda (R$)
 }
 
 
@@ -386,13 +387,14 @@ def cep(cep: str):
 
 @app.get("/cambio")
 def cambio():
-    resposta = httpx.get(
-        "https://economia.awesomeapi.com.br/json/last/USD-BRL,EUR-BRL", timeout=10)
-    dados = resposta.json()
+    """Câmbio oficial (PTAX) do Banco Central — mais confiável que agregadores."""
+    dolar = _sgs(SERIES_BCB["ptax_venda"])[0]
+    euro = _sgs(SERIES_BCB["eur_brl"])[0]
     return {
-        "dolar_brl": float(dados["USDBRL"]["bid"]),
-        "euro_brl": float(dados["EURBRL"]["bid"]),
-        "atualizado_em": dados["USDBRL"]["create_date"],
+        "dolar_brl": dolar["value"],
+        "euro_brl": euro["value"],
+        "atualizado_em": dolar["date"],
+        "source": "Banco Central do Brasil (PTAX)",
     }
 
 
