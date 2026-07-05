@@ -1,0 +1,46 @@
+# Vigia de vendas orgânicas: a cada 6h olha a blockchain e, se houver
+# recebimento em USDC vindo de um endereço diferente da carteira de teste,
+# abre uma issue no repo (que dispara e-mail para o Pedro).
+#
+# Cria só uma issue por transação (título contém o tx_hash; se já existe
+# issue com esse hash no título, pula).
+name: alerta-nova-venda
+
+on:
+  schedule:
+    - cron: "13 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  vigia:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: procura vendas orgânicas 24h
+        id: procurar
+        run: |
+          python3 scripts/monitor.py alerta > vendas.tsv
+          echo "qtd=$(wc -l < vendas.tsv | tr -d ' ')" >> "$GITHUB_OUTPUT"
+      - name: abre issue por venda nova
+        if: steps.procurar.outputs.qtd != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          while IFS=$'\t' read -r tx resumo; do
+            [ -z "$tx" ] && continue
+            # já existe issue para esse tx?
+            existe=$(gh issue list --state all --search "$tx in:title" --json number --jq 'length')
+            if [ "$existe" -gt 0 ]; then
+              echo "issue já existe para $tx, pulando"
+              continue
+            fi
+            titulo="🎉 Venda orgânica: $resumo ($tx)"
+            corpo=$(printf '## Primeira venda orgânica detectada\n\n- **Transação**: [%s](https://basescan.org/tx/%s)\n- **Detalhes**: %s\n- **Extrato completo da carteira**: https://basescan.org/address/0x649006bC937E7a60F98e49455D0fE3425321A3b0\n\nEsta issue foi criada automaticamente pelo vigia de vendas.\n' "$tx" "$tx" "$resumo")
+            gh issue create --title "$titulo" --body "$corpo" --label "venda"
+          done < vendas.tsv
