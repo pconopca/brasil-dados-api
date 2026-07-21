@@ -1,0 +1,36 @@
+# Atualiza o índice de sanções (dados/sancoes.json) toda segunda às 06:00 UTC.
+# Baixa o CEIS mais recente do Portal da Transparência, regenera o índice
+# compacto e, se houver mudança, commita direto na main — o que dispara o
+# redeploy automático do Render com os dados novos.
+name: atualizar-sancoes
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: gera índice atualizado
+        run: python3 scripts/atualizar_sancoes.py
+      - name: commita se mudou
+        run: |
+          if git diff --quiet dados/; then
+            echo "sem mudanças no índice de sanções"
+            exit 0
+          fi
+          git config user.name "brasil-dados-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add dados/sancoes.json dados/sancoes_meta.json
+          ref=$(python3 -c "import json;print(json.load(open('dados/sancoes_meta.json'))['gerado_em'])")
+          git commit -m "chore: update CEIS sanctions index (ref $ref)"
+          git push

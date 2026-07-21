@@ -11,7 +11,9 @@
     "economia_pacote": "$0.01",
     "verificar": "$0.001",
     "verificar_email": "$0.002",
-    "lote": "$0.01"
+    "lote": "$0.01",
+    "kyb_cnpj": "$0.01",
+    "kyb_sancoes": "$0.005"
   },
   "carteira_solana": "yUdt7ThMbP5mvtLtURiwK3wgnhexuFtbKC9LEgb1Q8e"
 }

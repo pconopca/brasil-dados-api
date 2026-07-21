@@ -42,6 +42,16 @@ PASTA = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PASTA, "config.json"), encoding="utf-8") as f:
     CONFIG = json.load(f)
 
+# índice de sanções (CEIS) carregado uma vez no boot — ~4.6 MB em memória.
+# Atualizado semanalmente por scripts/atualizar_sancoes.py (GitHub Actions).
+try:
+    with open(os.path.join(PASTA, "dados", "sancoes.json"), encoding="utf-8") as f:
+        SANCOES = json.load(f)
+    with open(os.path.join(PASTA, "dados", "sancoes_meta.json"), encoding="utf-8") as f:
+        SANCOES_META = json.load(f)
+except FileNotFoundError:
+    SANCOES, SANCOES_META = {}, {"gerado_em": None, "total_documentos": 0}
+
 # variáveis de ambiente (usadas na hospedagem) têm prioridade sobre config.json
 CARTEIRA = os.environ.get("X402_WALLET", CONFIG["carteira"])
 PRECOS = CONFIG["precos"]
@@ -226,6 +236,22 @@ ROTAS = {
         exemplo_entrada={"items": ["4111111111111111"]},
         exemplo_saida={"count": 1, "results": [
             {"card_prefix": "411111", "valid_format": True, "brand": "visa"}]}),
+    # --- KYB / compliance: dados cadastrais oficiais e triagem de sanções ---
+    "GET /kyb/cnpj/*": _rota(PRECOS["kyb_cnpj"],
+        "Full company dossier for a Brazilian CNPJ: legal name, registration status, "
+        "shareholders/partners (QSA), main and secondary business activities (CNAE), "
+        "share capital, address — plus an automatic sanctions screen against the "
+        "CEIS debarment list. Built for KYB / due-diligence. Official Receita Federal "
+        "and CGU data.",
+        exemplo_saida={"cnpj": "47960950000121", "legal_name": "MAGAZINE LUIZA S/A",
+                       "status": "ATIVA", "partners": [{"name": "FREDERICO T I RODRIGUES",
+                       "role": "Diretor"}], "sanctions": {"listed": False, "count": 0}}),
+    "GET /kyb/sanctions/*": _rota(PRECOS["kyb_sancoes"],
+        "Fast sanctions/debarment screen for a Brazilian CPF or CNPJ against the CEIS "
+        "list (companies and individuals barred from contracting with the public sector). "
+        "Official CGU/Portal da Transparência data.",
+        exemplo_saida={"document": "47960950000121", "listed": False, "count": 0,
+                       "sanctions": [], "source_date": "2026-07-21"}),
 }
 
 def montar_facilitadores():
@@ -489,8 +515,12 @@ def raiz():
             f"POST /verify/phone/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
             f"POST /verify/iban/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
             f"POST /verify/card/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
+            "GET /kyb/cnpj/{numero}": PRECOS["kyb_cnpj"],
+            "GET /kyb/sanctions/{document}": PRECOS["kyb_sancoes"],
         },
-        "source_attribution": "Economic data: Banco Central do Brasil (BCB/SGS, Olinda).",
+        "source_attribution": "Economic data: Banco Central do Brasil (BCB/SGS, Olinda). "
+                              "Company data: Receita Federal (BrasilAPI). "
+                              "Sanctions: CEIS/Portal da Transparência (CGU).",
     }
 
 
@@ -555,6 +585,81 @@ def cambio():
         "eur_brl": euro["value"],
         "updated_at": dolar["date"],
         "source": "Banco Central do Brasil (PTAX)",
+    }
+
+
+# --------------------------------------------- KYB / compliance
+
+def _consultar_sancoes(documento):
+    """Procura um CPF/CNPJ (só dígitos) no índice CEIS. Devolve resumo."""
+    lista = SANCOES.get(documento, [])
+    return {
+        "listed": bool(lista),
+        "count": len(lista),
+        "sanctions": lista,
+        "source": "CEIS - Portal da Transparência (CGU)",
+        "source_date": SANCOES_META.get("gerado_em"),
+    }
+
+
+@app.get("/kyb/sanctions/{documento}")
+def kyb_sanctions(documento: str):
+    digitos = _so_digitos(documento)
+    resultado = {"document": digitos}
+    resultado.update(_consultar_sancoes(digitos))
+    return resultado
+
+
+@app.get("/kyb/cnpj/{numero}")
+def kyb_cnpj(numero: str):
+    digitos = _so_digitos(numero)
+    if len(digitos) != 14:
+        raise HTTPException(status_code=400, detail="CNPJ must have 14 digits")
+    if not validar_cnpj(digitos):
+        raise HTTPException(status_code=400, detail="Invalid CNPJ (check digits)")
+    try:
+        resposta = httpx.get(f"https://brasilapi.com.br/api/cnpj/v1/{digitos}", timeout=15)
+    except httpx.RequestError:
+        raise HTTPException(status_code=503,
+                            detail="Upstream registry temporarily unavailable, retry shortly")
+    if resposta.status_code == 404:
+        raise HTTPException(status_code=404, detail="CNPJ not found")
+    if resposta.status_code == 429:
+        raise HTTPException(status_code=503,
+                            detail="Upstream registry rate-limited, retry shortly")
+    if resposta.status_code >= 500:
+        raise HTTPException(status_code=503,
+                            detail="Upstream registry temporarily unavailable, retry shortly")
+    resposta.raise_for_status()
+    d = resposta.json()
+
+    socios = [{"name": s.get("nome_socio"),
+               "role": s.get("qualificacao_socio"),
+               "since": s.get("data_entrada_sociedade"),
+               "age_range": s.get("faixa_etaria")}
+              for s in d.get("qsa", [])]
+    secundarios = [{"code": c.get("codigo"), "description": c.get("descricao")}
+                   for c in d.get("cnaes_secundarios", []) if c.get("codigo")]
+
+    return {
+        "cnpj": digitos,
+        "legal_name": d.get("razao_social"),
+        "trade_name": d.get("nome_fantasia"),
+        "status": d.get("descricao_situacao_cadastral"),
+        "status_date": d.get("data_situacao_cadastral"),
+        "legal_nature": d.get("natureza_juridica"),
+        "size": d.get("porte"),
+        "share_capital": d.get("capital_social"),
+        "opened_on": d.get("data_inicio_atividade"),
+        "main_activity": {"code": d.get("cnae_fiscal"),
+                          "description": d.get("cnae_fiscal_descricao")},
+        "secondary_activities": secundarios,
+        "partners": socios,
+        "address": {"street": d.get("logradouro"), "number": d.get("numero"),
+                    "district": d.get("bairro"), "city": d.get("municipio"),
+                    "state": d.get("uf"), "zip": d.get("cep")},
+        "sanctions": _consultar_sancoes(digitos),
+        "source": "Receita Federal (via BrasilAPI) + CEIS/CGU",
     }
 
 
