@@ -153,6 +153,17 @@ def modo_semanal():
     except Exception:
         indexados = -1  # sinaliza falha na consulta
 
+    # uso por endpoint desde o último deploy (contador em memória do servidor)
+    stats_endpoint = None
+    chave_admin = os.environ.get("ADMIN_KEY", "")
+    if chave_admin:
+        try:
+            url = f"{SERVICO}/admin/stats?key={chave_admin}"
+            with urllib.request.urlopen(url, timeout=30, context=CTX) as r:
+                stats_endpoint = json.load(r)
+        except Exception:
+            stats_endpoint = None
+
     hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     linhas = [
         f"# Relatório semanal — {hoje}",
@@ -168,6 +179,20 @@ def modo_semanal():
         f"- Status agora: {'✅ no ar' if no_ar else '⚠️ fora do ar'}",
         f"- Endpoints indexados no Bazaar da Coinbase: "
         f"{indexados if indexados >= 0 else 'não consegui consultar'} / 14",
+        "",
+        "## Uso por endpoint (desde o último deploy)",
+    ]
+    if stats_endpoint is None:
+        linhas.append("- não consegui consultar (ADMIN_KEY ausente ou serviço fora do ar)")
+    elif not stats_endpoint["by_endpoint"]:
+        linhas.append("- nenhuma chamada paga registrada ainda nesta janela")
+    else:
+        desde = stats_endpoint["counting_since"][:16].replace("T", " ")
+        linhas.append(f"- contando desde {desde} UTC "
+                      f"({stats_endpoint['total_paid_requests']} chamadas pagas no total)")
+        for rota, qtd in stats_endpoint["by_endpoint"].items():
+            linhas.append(f"  - `{rota}`: {qtd}")
+    linhas += [
         "",
         "## Links úteis",
         f"- [Extrato da carteira no Basescan]({BASESCAN}/address/{CARTEIRA_PEDRO})",
