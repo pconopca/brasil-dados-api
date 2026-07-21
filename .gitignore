@@ -3,3 +3,4 @@ __pycache__/
 carteira-teste-pagador.json
 .env
 carteira-compradora-mainnet.json
+admin-key.json

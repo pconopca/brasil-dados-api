@@ -22,12 +22,13 @@ import hashlib
 import json
 import os
 import re
+from collections import Counter
 from datetime import datetime, timezone
 
 import dns.resolver
 import httpx
 import phonenumbers
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption, RouteConfig
 from x402.http.middleware.fastapi import payment_middleware
@@ -169,8 +170,34 @@ def montar_facilitador():
 facilitador = montar_facilitador()
 _servidor = x402ResourceServer(facilitador)
 _servidor.register_extension(bazaar_resource_server_extension)
+
+# --------------------------------------------- analytics de uso (por endpoint)
+#
+# Contador em memória de chamadas PAGAS com sucesso, por rota. Zera a cada
+# reinício do serviço (deploy, ou restart do Render) — propositalmente
+# simples, sem banco de dados externo. O objetivo é responder "o que estão
+# comprando?", não contabilidade financeira exata (para isso, ver
+# scripts/monitor.py, que lê a blockchain).
+
+_ESTATISTICAS = Counter()
+_INICIO_CONTAGEM = datetime.now(timezone.utc)
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 register_exact_evm_server(_servidor)
 app.middleware("http")(payment_middleware(ROTAS, _servidor))
+
+
+@app.middleware("http")
+async def _contar_uso_pago(request: Request, call_next):
+    """Roda DEPOIS do middleware de pagamento (registrado por último = mais
+    interno na pilha), então só vê requisições que já passaram pelo 402 —
+    ou seja, só conta chamadas efetivamente pagas e bem-sucedidas."""
+    resposta = await call_next(request)
+    if resposta.status_code == 200:
+        rota = request.scope.get("route")
+        caminho = rota.path if rota else request.url.path
+        if caminho not in ("/", "/admin/stats"):
+            _ESTATISTICAS[caminho] += 1
+    return resposta
 
 
 # ---------------------------------------------------------------- validações
@@ -306,6 +333,19 @@ BANDEIRAS = [
 
 
 # ---------------------------------------------------------------- endpoints
+
+@app.get("/admin/stats")
+def admin_stats(key: str = ""):
+    """Estatísticas de uso pago por endpoint — só para o dono do serviço."""
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+    total = sum(_ESTATISTICAS.values())
+    return {
+        "counting_since": _INICIO_CONTAGEM.isoformat(),
+        "total_paid_requests": total,
+        "by_endpoint": dict(_ESTATISTICAS.most_common()),
+    }
+
 
 @app.get("/")
 def raiz():
