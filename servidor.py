@@ -242,7 +242,7 @@ async def _contar_uso_pago(request: Request, call_next):
     if resposta.status_code == 200:
         rota = request.scope.get("route")
         caminho = rota.path if rota else request.url.path
-        if caminho not in ("/", "/admin/stats"):
+        if caminho not in ("/", "/admin/stats", "/openapi.json", "/docs", "/redoc"):
             _ESTATISTICAS[caminho] += 1
     return resposta
 
