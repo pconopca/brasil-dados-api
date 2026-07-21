@@ -1,7 +1,12 @@
 fastapi
 uvicorn
 httpx
-x402[extensions]
+x402[extensions,svm]
 dnspython
 phonenumbers
 cdp-sdk
+# solana>=0.37 removeu solana.rpc.api.Client (só ficou o async), o que
+# quebra o mecanismo SVM do x402 hoje; 0.36.12 é a mais nova que ainda
+# tem o cliente síncrono E satisfaz o mínimo exigido pelo cdp-sdk.
+solana==0.36.12
+solders>=0.26.0

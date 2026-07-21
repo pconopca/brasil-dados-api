@@ -53,6 +53,22 @@ REDES = {
 NOME_REDE = os.environ.get("X402_NETWORK", CONFIG["rede"])
 REDE = REDES.get(NOME_REDE, NOME_REDE)
 
+# --- trilho Solana (opcional, além da Base) ---
+#
+# Só fica ATIVO se a variável X402_WALLET_SOLANA estiver configurada — sem
+# ela, o comportamento do serviço não muda em nada (mesma rota EVM de
+# sempre). Isso deixa publicar este código sem nenhum risco ao trilho Base
+# que já está funcionando e gerando receita: a rota Solana só entra em
+# produção quando a carteira estiver pronta e testada.
+CARTEIRA_SOLANA = os.environ.get("X402_WALLET_SOLANA", "")
+REDES_SOLANA = {
+    "solana": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",         # mainnet
+    "solana-devnet": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",  # teste
+}
+NOME_REDE_SOLANA = os.environ.get("X402_NETWORK_SOLANA", "solana-devnet")
+REDE_SOLANA = REDES_SOLANA.get(NOME_REDE_SOLANA, NOME_REDE_SOLANA)
+SOLANA_ATIVO = bool(CARTEIRA_SOLANA)
+
 if CARTEIRA == "0x0000000000000000000000000000000000000001":
     print("=" * 70)
     print("ATENÇÃO: usando carteira de DEMONSTRAÇÃO. Pagamentos não chegam a")
@@ -63,7 +79,13 @@ app = FastAPI(title=CONFIG["nome_servico"])
 
 
 def _opcao(preco):
-    return PaymentOption(scheme="exact", pay_to=CARTEIRA, price=preco, network=REDE)
+    """Uma ou duas formas de pagamento aceitas para o mesmo preço: sempre a
+    rede EVM configurada (Base), e Solana também, se estiver ativada."""
+    opcoes = [PaymentOption(scheme="exact", pay_to=CARTEIRA, price=preco, network=REDE)]
+    if SOLANA_ATIVO:
+        opcoes.append(PaymentOption(scheme="exact", pay_to=CARTEIRA_SOLANA,
+                                    price=preco, network=REDE_SOLANA))
+    return opcoes
 
 
 def _rota(preco, descricao, exemplo_saida=None, esquema_path=None):
@@ -141,33 +163,54 @@ ROTAS = {
                        "source": "Banco Central do Brasil (PTAX)"}),
 }
 
-def montar_facilitador():
-    """Escolhe quem liquida os pagamentos, do mais ao menos preferido:
-    1. Coinbase CDP — se houver chaves no ambiente (produção recomendada);
+def montar_facilitadores():
+    """Escolhe quem liquida os pagamentos. Pode ser mais de um: o SDK
+    consulta cada facilitador na inicialização e monta um mapa (rede,
+    esquema) -> facilitador automaticamente, então dá pra usar um para
+    Base e outro para Solana sem conflito — o primeiro da lista que
+    anunciar suporte a uma combinação vence.
+
+    Ordem de preferência para a rede principal (EVM/Base):
+    1. Coinbase CDP — se houver chaves no ambiente (produção recomendada,
+       é o que nos deixou catalogados no Bazaar);
     2. PayAI — rede principal sem precisar de chaves;
-    3. x402.org — só redes de teste.
+    3. x402.org — só redes de teste (também cobre solana-devnet).
+
+    Se o trilho Solana estiver ativo e for a rede principal (mainnet),
+    adicionamos o PayAI como reforço — ele declara suporte explícito a
+    Solana, garantindo a liquidação mesmo que o CDP não cubra essa rede.
+
     O facilitador nunca segura o dinheiro: a assinatura do pagador já fixa
     a carteira de destino; ele apenas verifica e registra na blockchain.
     """
     from x402.http import CreateHeadersAuthProvider
+    lista = []
     if os.environ.get("CDP_API_KEY_ID") and os.environ.get("CDP_API_KEY_SECRET"):
         from cdp.x402 import create_facilitator_config
         cfg = create_facilitator_config()
         # o helper do cdp-sdk pode retornar dict ou objeto conforme a versão
         obter = (lambda k: cfg[k]) if isinstance(cfg, dict) else (lambda k: getattr(cfg, k))
         print("Facilitador: Coinbase CDP (com chaves de API)")
-        return HTTPFacilitatorClient(FacilitatorConfig(
+        lista.append(HTTPFacilitatorClient(FacilitatorConfig(
             url=obter("url"),
-            auth_provider=CreateHeadersAuthProvider(obter("create_headers"))))
-    if REDE == "eip155:8453":
+            auth_provider=CreateHeadersAuthProvider(obter("create_headers")))))
+    elif REDE == "eip155:8453":
         print("Facilitador: PayAI (rede principal, sem chaves)")
-        return HTTPFacilitatorClient(FacilitatorConfig(
-            url="https://facilitator.payai.network"))
-    print("Facilitador: x402.org (rede de teste)")
-    return HTTPFacilitatorClient(FacilitatorConfig(url=CONFIG["facilitador"]))
+        lista.append(HTTPFacilitatorClient(FacilitatorConfig(
+            url="https://facilitator.payai.network")))
+    else:
+        print("Facilitador: x402.org (rede de teste)")
+        lista.append(HTTPFacilitatorClient(FacilitatorConfig(url=CONFIG["facilitador"])))
+
+    if SOLANA_ATIVO and REDE_SOLANA == REDES_SOLANA["solana"] and lista and \
+            "payai" not in lista[0].url:
+        print("Facilitador extra: PayAI (reforço para Solana mainnet)")
+        lista.append(HTTPFacilitatorClient(FacilitatorConfig(
+            url="https://facilitator.payai.network")))
+    return lista
 
 
-facilitador = montar_facilitador()
+facilitador = montar_facilitadores()
 _servidor = x402ResourceServer(facilitador)
 _servidor.register_extension(bazaar_resource_server_extension)
 
@@ -183,6 +226,10 @@ _ESTATISTICAS = Counter()
 _INICIO_CONTAGEM = datetime.now(timezone.utc)
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 register_exact_evm_server(_servidor)
+if SOLANA_ATIVO:
+    from x402.mechanisms.svm.exact import register_exact_svm_server
+    register_exact_svm_server(_servidor)
+    print(f"Trilho Solana ATIVO: {NOME_REDE_SOLANA} -> {CARTEIRA_SOLANA}")
 app.middleware("http")(payment_middleware(ROTAS, _servidor))
 
 
