@@ -29,6 +29,7 @@ import dns.resolver
 import httpx
 import phonenumbers
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
 
 from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption, RouteConfig
 from x402.http.middleware.fastapi import payment_middleware
@@ -44,6 +45,7 @@ with open(os.path.join(PASTA, "config.json"), encoding="utf-8") as f:
 # variáveis de ambiente (usadas na hospedagem) têm prioridade sobre config.json
 CARTEIRA = os.environ.get("X402_WALLET", CONFIG["carteira"])
 PRECOS = CONFIG["precos"]
+MAX_LOTE = 25  # máximo de itens por chamada de validação em lote
 
 # nomes amigáveis -> identificador padrão da rede (CAIP-2)
 REDES = {
@@ -109,6 +111,34 @@ def _rota(preco, descricao, exemplo_saida=None, esquema_path=None):
     )
 
 
+class LoteEntrada(BaseModel):
+    items: list[str]
+
+
+def _validar_tamanho_lote(entrada: LoteEntrada):
+    if not entrada.items:
+        raise HTTPException(status_code=400, detail="items must not be empty")
+    if len(entrada.items) > MAX_LOTE:
+        raise HTTPException(status_code=400,
+                            detail=f"max {MAX_LOTE} items per batch call")
+
+
+def _rota_lote(preco, descricao, exemplo_entrada, exemplo_saida):
+    """Rota paga POST com corpo JSON (endpoints de validação em lote)."""
+    extensao = declare_discovery_extension(
+        input=exemplo_entrada, body_type="json",
+        output=OutputConfig(example=exemplo_saida),
+    )
+    return RouteConfig(
+        accepts=_opcao(preco),
+        description=descricao,
+        service_name=CONFIG["nome_servico"],
+        mime_type="application/json",
+        tags=["brazil", "brasil", "data", "verify", "batch"],
+        extensions=extensao,
+    )
+
+
 ROTAS = {
     # --- dados econômicos oficiais (Banco Central do Brasil) ---
     "GET /economy/overview": _rota(PRECOS["economia_pacote"],
@@ -161,6 +191,41 @@ ROTAS = {
         "Official USD/BRL and EUR/BRL exchange rates (PTAX, Central Bank of Brazil).",
         exemplo_saida={"usd_brl": 5.19, "eur_brl": 5.94,
                        "source": "Banco Central do Brasil (PTAX)"}),
+    # --- validação em lote: mais barato por item que chamadas individuais,
+    # e processa tudo numa única requisição/pagamento. Limitado aos
+    # validadores que rodam localmente (sem chamar API externa por item),
+    # para não travar com listas grandes. ---
+    "POST /cpf/batch": _rota_lote(PRECOS["lote"],
+        f"Validate up to {MAX_LOTE} Brazilian CPF tax IDs in a single call. "
+        "Cheaper per-item than individual requests — built for bulk/KYB workflows.",
+        exemplo_entrada={"items": ["52998224725", "11144477735"]},
+        exemplo_saida={"count": 2, "results": [
+            {"cpf": "52998224725", "valid": True, "formatted": "529.982.247-25"},
+            {"cpf": "11144477735", "valid": False, "formatted": None}]}),
+    "POST /cnpj/batch": _rota_lote(PRECOS["lote"],
+        f"Validate up to {MAX_LOTE} Brazilian CNPJ company tax IDs in a single call. "
+        "Cheaper per-item than individual requests — built for bulk/KYB workflows.",
+        exemplo_entrada={"items": ["11222333000181"]},
+        exemplo_saida={"count": 1, "results": [
+            {"cnpj": "11222333000181", "valid": True, "formatted": "11.222.333/0001-81"}]}),
+    "POST /verify/phone/batch": _rota_lote(PRECOS["lote"],
+        f"Validate up to {MAX_LOTE} international phone numbers (E.164) in a single call. "
+        "Cheaper per-item than individual requests.",
+        exemplo_entrada={"items": ["+5511987654321"]},
+        exemplo_saida={"count": 1, "results": [
+            {"phone": "+5511987654321", "valid": True, "country": "BR", "type": "mobile"}]}),
+    "POST /verify/iban/batch": _rota_lote(PRECOS["lote"],
+        f"Validate up to {MAX_LOTE} IBAN bank account numbers (mod-97 checksum) in a single call. "
+        "Cheaper per-item than individual requests.",
+        exemplo_entrada={"items": ["DE89370400440532013000"]},
+        exemplo_saida={"count": 1, "results": [
+            {"iban": "DE89370400440532013000", "valid": True, "country": "DE"}]}),
+    "POST /verify/card/batch": _rota_lote(PRECOS["lote"],
+        f"Validate up to {MAX_LOTE} payment card numbers (Luhn + brand) in a single call. "
+        "Format only, no account lookup. Cheaper per-item than individual requests.",
+        exemplo_entrada={"items": ["4111111111111111"]},
+        exemplo_saida={"count": 1, "results": [
+            {"card_prefix": "411111", "valid_format": True, "brand": "visa"}]}),
 }
 
 def montar_facilitadores():
@@ -419,6 +484,11 @@ def raiz():
             "GET /cnpj/{numero}": PRECOS["validar_documento"],
             "GET /cep/{cep}": PRECOS["consultar_cep"],
             "GET /cambio": PRECOS["cambio"],
+            f"POST /cpf/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
+            f"POST /cnpj/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
+            f"POST /verify/phone/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
+            f"POST /verify/iban/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
+            f"POST /verify/card/batch (up to {MAX_LOTE} items)": PRECOS["lote"],
         },
         "source_attribution": "Economic data: Banco Central do Brasil (BCB/SGS, Olinda).",
     }
@@ -433,6 +503,13 @@ def cpf(numero: str):
     return {"cpf": digitos, "valid": valido, "formatted": formatado if valido else None}
 
 
+@app.post("/cpf/batch")
+def cpf_batch(entrada: LoteEntrada):
+    _validar_tamanho_lote(entrada)
+    resultados = [cpf(numero) for numero in entrada.items]
+    return {"count": len(resultados), "results": resultados}
+
+
 @app.get("/cnpj/{numero}")
 def cnpj(numero: str):
     digitos = _so_digitos(numero)
@@ -440,6 +517,13 @@ def cnpj(numero: str):
     formatado = (f"{digitos[:2]}.{digitos[2:5]}.{digitos[5:8]}/"
                  f"{digitos[8:12]}-{digitos[12:]}" if len(digitos) == 14 else None)
     return {"cnpj": digitos, "valid": valido, "formatted": formatado if valido else None}
+
+
+@app.post("/cnpj/batch")
+def cnpj_batch(entrada: LoteEntrada):
+    _validar_tamanho_lote(entrada)
+    resultados = [cnpj(numero) for numero in entrada.items]
+    return {"count": len(resultados), "results": resultados}
 
 
 @app.get("/cep/{cep}")
@@ -588,6 +672,13 @@ def verify_phone(numero: str):
     return _com_recibo(numero, resultado)
 
 
+@app.post("/verify/phone/batch")
+def verify_phone_batch(entrada: LoteEntrada):
+    _validar_tamanho_lote(entrada)
+    resultados = [verify_phone(numero) for numero in entrada.items]
+    return {"count": len(resultados), "results": resultados}
+
+
 @app.get("/verify/iban/{iban}")
 def verify_iban(iban: str):
     normalizado, valido = validar_iban(iban)
@@ -595,6 +686,13 @@ def verify_iban(iban: str):
         "iban": normalizado, "valid": valido,
         "country": normalizado[:2] if valido else None,
     })
+
+
+@app.post("/verify/iban/batch")
+def verify_iban_batch(entrada: LoteEntrada):
+    _validar_tamanho_lote(entrada)
+    resultados = [verify_iban(iban) for iban in entrada.items]
+    return {"count": len(resultados), "results": resultados}
 
 
 @app.get("/verify/card/{numero}")
@@ -612,3 +710,10 @@ def verify_card(numero: str):
         "valid_format": valido, "brand": bandeira,
         "note": "Format/checksum validation only; no account lookup.",
     })
+
+
+@app.post("/verify/card/batch")
+def verify_card_batch(entrada: LoteEntrada):
+    _validar_tamanho_lote(entrada)
+    resultados = [verify_card(numero) for numero in entrada.items]
+    return {"count": len(resultados), "results": resultados}

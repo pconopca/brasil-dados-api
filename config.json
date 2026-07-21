@@ -10,7 +10,8 @@
     "economia": "$0.005",
     "economia_pacote": "$0.01",
     "verificar": "$0.001",
-    "verificar_email": "$0.002"
+    "verificar_email": "$0.002",
+    "lote": "$0.01"
   },
   "carteira_solana": "yUdt7ThMbP5mvtLtURiwK3wgnhexuFtbKC9LEgb1Q8e"
 }
