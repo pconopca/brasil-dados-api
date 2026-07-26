@@ -29,6 +29,7 @@ import dns.resolver
 import httpx
 import phonenumbers
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption, RouteConfig
@@ -87,7 +88,10 @@ if CARTEIRA == "0x0000000000000000000000000000000000000001":
     print("ninguém. Edite config.json e coloque o seu endereço (MetaMask).")
     print("=" * 70)
 
-app = FastAPI(title=CONFIG["nome_servico"])
+app = FastAPI(
+    title=CONFIG["nome_servico"],
+    contact={"email": "protocolraiderdefi@gmail.com"},
+)
 
 
 def _opcao(preco):
@@ -333,7 +337,7 @@ async def _contar_uso_pago(request: Request, call_next):
     if resposta.status_code == 200:
         rota = request.scope.get("route")
         caminho = rota.path if rota else request.url.path
-        if caminho not in ("/", "/admin/stats", "/openapi.json", "/docs", "/redoc"):
+        if caminho not in ("/", "/admin/stats", "/openapi.json", "/docs", "/redoc", "/favicon.ico"):
             _ESTATISTICAS[caminho] += 1
     return resposta
 
@@ -471,6 +475,11 @@ BANDEIRAS = [
 
 
 # ---------------------------------------------------------------- endpoints
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(os.path.join(PASTA, "favicon.ico"))
+
 
 @app.get("/admin/stats")
 def admin_stats(key: str = ""):
