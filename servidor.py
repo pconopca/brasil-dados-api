@@ -483,7 +483,7 @@ def favicon():
 
 @app.get("/admin/stats")
 def admin_stats(key: str = ""):
-    """Estatísticas de uso pago por endpoint — só para o dono do serviço."""
+    """Paid usage statistics per endpoint — service owner only, key-protected."""
     if not ADMIN_KEY or key != ADMIN_KEY:
         raise HTTPException(status_code=404, detail="Not found")
     total = sum(_ESTATISTICAS.values())
@@ -496,7 +496,7 @@ def admin_stats(key: str = ""):
 
 @app.get("/")
 def raiz():
-    """Descrição do serviço — grátis, para agentes descobrirem o que vendemos."""
+    """Free service description endpoint, for agents to discover what we sell."""
     return {
         "service": CONFIG["nome_servico"],
         "description": "Brazilian data for AI agents: official Central Bank "
@@ -586,7 +586,7 @@ def cep(cep: str):
 
 @app.get("/cambio")
 def cambio():
-    """Câmbio oficial (PTAX) do Banco Central — mais confiável que agregadores."""
+    """Official USD/BRL and EUR/BRL rates (PTAX, Central Bank of Brazil) — more reliable than aggregators."""
     dolar = _sgs(SERIES_BCB["ptax_venda"])[0]
     euro = _sgs(SERIES_BCB["eur_brl"])[0]
     return {
