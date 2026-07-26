@@ -568,10 +568,11 @@ def raiz():
     """Free service description endpoint, for agents to discover what we sell."""
     return {
         "service": CONFIG["nome_servico"],
-        "description": "Brazilian data for AI agents: official Central Bank "
-                       "economic indicators (SELIC, IPCA, CDI, PTAX, Focus "
-                       "forecasts), document/address lookups, and universal "
-                       "verification with receipts. Pay per call via x402 (USDC).",
+        "description": "Data about Brazil for AI agents: official Central Bank of "
+                       "Brazil economic indicators (SELIC, IPCA, CDI, PTAX, Focus "
+                       "forecasts), Brazil KYB company dossiers and sanctions "
+                       "screening, CPF/CNPJ/CEP lookups, and universal verification "
+                       "with receipts. Pay per call via x402 (USDC).",
         "network": REDE,
         "endpoints": {
             "GET /economy/overview": PRECOS["economia_pacote"],
