@@ -29,7 +29,7 @@ import dns.resolver
 import httpx
 import phonenumbers
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption, RouteConfig
@@ -57,6 +57,7 @@ except FileNotFoundError:
 CARTEIRA = os.environ.get("X402_WALLET", CONFIG["carteira"])
 PRECOS = CONFIG["precos"]
 MAX_LOTE = 25  # máximo de itens por chamada de validação em lote
+SERVICO_URL = "https://brasil-dados-api.onrender.com"
 
 # nomes amigáveis -> identificador padrão da rede (CAIP-2)
 REDES = {
@@ -337,7 +338,8 @@ async def _contar_uso_pago(request: Request, call_next):
     if resposta.status_code == 200:
         rota = request.scope.get("route")
         caminho = rota.path if rota else request.url.path
-        if caminho not in ("/", "/admin/stats", "/openapi.json", "/docs", "/redoc", "/favicon.ico"):
+        if caminho not in ("/", "/admin/stats", "/openapi.json", "/docs", "/redoc",
+                           "/favicon.ico", "/llms.txt"):
             _ESTATISTICAS[caminho] += 1
     return resposta
 
@@ -479,6 +481,73 @@ BANDEIRAS = [
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return FileResponse(os.path.join(PASTA, "favicon.ico"))
+
+
+@app.get("/llms.txt", include_in_schema=False)
+def llms_txt():
+    """Free, plain-text summary for LLM-based agents (llms.txt convention).
+
+    Built from PRECOS/MAX_LOTE at request time so it never drifts out of
+    sync if pricing changes later.
+    """
+    texto = f"""# {CONFIG['nome_servico']}
+
+> Brazilian data for AI agents, paid per call in USDC via the x402 protocol \
+(no API keys, no accounts, no subscriptions).
+
+Official Central Bank of Brazil economic indicators, KYB company and \
+sanctions screening, universal verification with timestamped SHA-256 \
+receipts, and Brazilian document/address utilities. Every paid endpoint \
+returns `402 Payment Required` with payment instructions; pay in USDC on \
+Base or Solana mainnet (buyer's choice — gas is sponsored by the \
+facilitator on both) and retry to receive the data.
+
+Base URL: {SERVICO_URL}
+
+## Economic data (Banco Central do Brasil)
+
+- [Overview]({SERVICO_URL}/economy/overview): SELIC, CDI, IPCA (monthly + 12-month), PTAX in one call — {PRECOS['economia_pacote']}
+- [Focus forecasts]({SERVICO_URL}/economy/focus): market median forecasts (IPCA, SELIC, GDP, USD/BRL) — {PRECOS['economia_pacote']}
+- [SELIC]({SERVICO_URL}/economy/selic): policy interest rate — {PRECOS['economia']}
+- [CDI]({SERVICO_URL}/economy/cdi): interbank rate — {PRECOS['economia']}
+- [IPCA]({SERVICO_URL}/economy/ipca): consumer inflation — {PRECOS['economia']}
+- [PTAX]({SERVICO_URL}/economy/ptax): official USD/BRL reference rate — {PRECOS['economia']}
+- [Exchange rate]({SERVICO_URL}/cambio): USD/BRL and EUR/BRL — {PRECOS['cambio']}
+
+## KYB / compliance
+
+- [CNPJ dossier]({SERVICO_URL}/kyb/cnpj/{{numero}}): legal name, status, partners (QSA), CNAE, share capital, plus sanctions screen — {PRECOS['kyb_cnpj']}
+- [Sanctions screen]({SERVICO_URL}/kyb/sanctions/{{documento}}): CPF/CNPJ against the CEIS debarment list — {PRECOS['kyb_sancoes']}
+
+## Verification (with signed receipts)
+
+- [Email]({SERVICO_URL}/verify/email/{{email}}): syntax + real DNS/MX lookup — {PRECOS['verificar_email']}
+- [Phone]({SERVICO_URL}/verify/phone/{{number}}): E.164 validation, country, type — {PRECOS['verificar']}
+- [IBAN]({SERVICO_URL}/verify/iban/{{iban}}): mod-97 checksum — {PRECOS['verificar']}
+- [Card]({SERVICO_URL}/verify/card/{{number}}): Luhn checksum + brand (format only) — {PRECOS['verificar']}
+
+## Brazilian documents & address
+
+- [CPF]({SERVICO_URL}/cpf/{{numero}}): tax ID validation (check digits) — {PRECOS['validar_documento']}
+- [CNPJ]({SERVICO_URL}/cnpj/{{numero}}): company tax ID validation — {PRECOS['validar_documento']}
+- [CEP]({SERVICO_URL}/cep/{{cep}}): postal code to full address — {PRECOS['consultar_cep']}
+
+## Batch (bulk/KYB workflows, up to {MAX_LOTE} items per call)
+
+- [CPF batch]({SERVICO_URL}/cpf/batch) (POST): up to {MAX_LOTE} CPFs — {PRECOS['lote']}
+- [CNPJ batch]({SERVICO_URL}/cnpj/batch) (POST): up to {MAX_LOTE} CNPJs — {PRECOS['lote']}
+- [Phone batch]({SERVICO_URL}/verify/phone/batch) (POST): up to {MAX_LOTE} phone numbers — {PRECOS['lote']}
+- [IBAN batch]({SERVICO_URL}/verify/iban/batch) (POST): up to {MAX_LOTE} IBANs — {PRECOS['lote']}
+- [Card batch]({SERVICO_URL}/verify/card/batch) (POST): up to {MAX_LOTE} cards — {PRECOS['lote']}
+
+## Optional
+
+- [OpenAPI schema]({SERVICO_URL}/openapi.json): full machine-readable spec
+- [Free service listing]({SERVICO_URL}/): all endpoints with current prices, no payment required
+- [Source code](https://github.com/pconopca/brasil-dados-api)
+- Contact: protocolraiderdefi@gmail.com
+"""
+    return PlainTextResponse(texto)
 
 
 @app.get("/admin/stats")
