@@ -18,6 +18,7 @@ Rodar localmente:
     .venv/bin/uvicorn servidor:app --host 0.0.0.0 --port 8000
 """
 
+import copy
 import hashlib
 import json
 import os
@@ -258,6 +259,32 @@ ROTAS = {
         exemplo_saida={"document": "47960950000121", "listed": False, "count": 0,
                        "sanctions": [], "source_date": "2026-07-21"}),
 }
+
+# --------------------------------------------- rotas-espelho em inglês
+#
+# Mesmos dados, mesmos preços, caminhos em inglês. Motivo: a busca dos
+# diretórios x402 (medido no x402scan) casa pelo ENDEREÇO do recurso, não
+# pela descrição nem pelas tags — procurar "brazil" não nos encontra, porque
+# nosso domínio usa a grafia portuguesa "brasil". Estes espelhos resolvem
+# isso sem renomear o domínio, o que quebraria os compradores atuais e
+# invalidaria os registros já catalogados.
+#
+# Só espelhamos os endpoints de maior valor (economia + KYB), para não
+# inflar o catálogo. Os caminhos usam o termo que um agente realmente
+# buscaria ("inflation", "interest-rate") em vez da sigla local (IPCA,
+# SELIC), ampliando o alcance para além da palavra "brazil".
+ESPELHOS = {
+    "GET /brazil/economy/overview": "GET /economy/overview",
+    "GET /brazil/economy/interest-rate": "GET /economy/selic",
+    "GET /brazil/economy/inflation": "GET /economy/ipca",
+    "GET /brazil/economy/exchange-rate": "GET /economy/ptax",
+    "GET /brazil/economy/forecasts": "GET /economy/focus",
+    "GET /brazil/company/*": "GET /kyb/cnpj/*",
+    "GET /brazil/sanctions/*": "GET /kyb/sanctions/*",
+}
+for _espelho, _canonico in ESPELHOS.items():
+    ROTAS[_espelho] = copy.deepcopy(ROTAS[_canonico])
+
 
 def montar_facilitadores():
     """Escolhe quem liquida os pagamentos. Pode ser mais de um: o SDK
@@ -901,3 +928,43 @@ def verify_card_batch(entrada: LoteEntrada):
     _validar_tamanho_lote(entrada)
     resultados = [verify_card(numero) for numero in entrada.items]
     return {"count": len(resultados), "results": resultados}
+
+
+# --------------------------------------------- espelhos em inglês
+#
+# Apenas encaminham para os manipuladores canônicos — nenhuma lógica
+# duplicada. Ver o comentário do dicionário ESPELHOS acima para o porquê.
+
+@app.get("/brazil/economy/overview")
+def brazil_economy_overview():
+    return economy_overview()
+
+
+@app.get("/brazil/economy/interest-rate")
+def brazil_interest_rate():
+    return economy_selic()
+
+
+@app.get("/brazil/economy/inflation")
+def brazil_inflation():
+    return economy_ipca()
+
+
+@app.get("/brazil/economy/exchange-rate")
+def brazil_exchange_rate():
+    return economy_ptax()
+
+
+@app.get("/brazil/economy/forecasts")
+def brazil_forecasts():
+    return economy_focus()
+
+
+@app.get("/brazil/company/{numero}")
+def brazil_company(numero: str):
+    return kyb_cnpj(numero)
+
+
+@app.get("/brazil/sanctions/{documento}")
+def brazil_sanctions(documento: str):
+    return kyb_sanctions(documento)
