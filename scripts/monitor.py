@@ -17,6 +17,7 @@ import json
 import os
 import ssl
 import sys
+import time
 import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
@@ -282,23 +283,32 @@ def modo_semanal():
     except Exception:
         no_ar = False
 
-    # indexação no Bazaar
-    indexados = 0
-    try:
-        offset = 0
-        while offset < 30000:
-            url = ("https://api.cdp.coinbase.com/platform/v2/x402/discovery/"
-                   f"resources?limit=100&offset={offset}")
-            with urllib.request.urlopen(url, timeout=30, context=CTX) as r:
-                d = json.load(r)
-            for it in d.get("items", []):
-                if "brasil-dados-api" in json.dumps(it).lower():
-                    indexados += 1
-            offset += len(d.get("items", []))
-            if not d.get("items") or offset >= d.get("pagination", {}).get("total", 0):
-                break
-    except Exception:
-        indexados = -1  # sinaliza falha na consulta
+    # indexação no Bazaar — o catálogo não tem busca confiável por domínio,
+    # então varremos tudo (pode passar de 20 mil itens). Sem pausa entre
+    # páginas isso apanha da própria API do Coinbase (rate limit) e falha
+    # a meio; uma pausa curta + uma segunda tentativa resolve.
+    TOTAL_ENDPOINTS = 28  # atualizar se o número de rotas pagas mudar
+    indexados = -1
+    for _tentativa in range(2):
+        try:
+            achados, offset = 0, 0
+            while offset < 30000:
+                url = ("https://api.cdp.coinbase.com/platform/v2/x402/discovery/"
+                       f"resources?limit=100&offset={offset}")
+                with urllib.request.urlopen(url, timeout=30, context=CTX) as r:
+                    d = json.load(r)
+                for it in d.get("items", []):
+                    if "brasil-dados-api" in json.dumps(it).lower():
+                        achados += 1
+                offset += len(d.get("items", []))
+                if not d.get("items") or offset >= d.get("pagination", {}).get("total", 0):
+                    break
+                time.sleep(0.5)
+            indexados = achados
+            break
+        except Exception:
+            indexados = -1
+            time.sleep(3)
 
     # uso por endpoint desde o último deploy (contador em memória do servidor)
     stats_endpoint = None
@@ -348,7 +358,7 @@ def modo_semanal():
         "## Serviço",
         f"- Status agora: {'✅ no ar' if no_ar else '⚠️ fora do ar'}",
         f"- Endpoints indexados no Bazaar da Coinbase: "
-        f"{indexados if indexados >= 0 else 'não consegui consultar'} / 14",
+        f"{indexados if indexados >= 0 else 'não consegui consultar'} / {TOTAL_ENDPOINTS}",
         "",
         "## Uso por endpoint (desde o último deploy)",
     ]
